@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { MERGE_CUSTOM_TYPE } from "../src/constants.ts";
+import { MERGE_CUSTOM_TYPE, summaryPrompt } from "../src/constants.ts";
 import {
 	buildMergeMessage,
 	buildTranscript,
@@ -12,6 +12,7 @@ import {
 	isMergeRequest,
 	lastAssistantText,
 	type MergeRequest,
+	summaryReplyText,
 } from "../src/merge.ts";
 
 const message = (role: string, content: unknown, extra: Record<string, unknown> = {}) => ({
@@ -52,6 +53,42 @@ test("a single oversized turn keeps its tail", () => {
 test("last assistant text skips failed turns", () => {
 	assert.equal(lastAssistantText([message("assistant", "ok"), message("user", "go")]), "ok");
 	assert.equal(lastAssistantText([message("assistant", "partial", { stopReason: "aborted" })]), undefined);
+});
+
+test("transcript leaves out summary turns", () => {
+	const transcript = buildTranscript([
+		message("user", "Why X?"),
+		message("assistant", "Because Y."),
+		message("user", summaryPrompt(false)),
+		message("assistant", "Summary of X."),
+		message("user", "And Z?"),
+		message("assistant", "Z too."),
+	]);
+	assert.equal(transcript, "User:\nWhy X?\n\nAssistant:\nBecause Y.\n\nUser:\nAnd Z?\n\nAssistant:\nZ too.");
+	assert.equal(buildTranscript([message("user", summaryPrompt(true)), message("assistant", "S")]), undefined);
+});
+
+test("the summary is the reply to the summary prompt, not an earlier answer", () => {
+	const prompt = summaryPrompt(false);
+	const before = [message("user", "Why X?"), message("assistant", "Because Y.")];
+	assert.equal(summaryReplyText(before, prompt), undefined, "no summary prompt yet");
+	assert.equal(summaryReplyText([...before, message("user", prompt)], prompt), undefined, "the run produced nothing");
+	assert.equal(
+		summaryReplyText([...before, message("user", prompt), message("assistant", "partial", { stopReason: "error" })], prompt),
+		undefined,
+	);
+	const done = [
+		...before,
+		message("user", [{ type: "text", text: prompt }]),
+		message("assistant", [{ type: "text", text: "Checking." }, { type: "toolCall", name: "read", arguments: {} }]),
+		message("toolResult", [{ type: "text", text: "body" }]),
+		message("assistant", "The summary."),
+	];
+	assert.equal(summaryReplyText(done, prompt), "The summary.");
+	// A later user turn ends the summary turn.
+	assert.equal(summaryReplyText([...done.slice(0, 4), message("user", "next"), message("assistant", "other")], prompt), "Checking.");
+	// The other prompt variant does not match.
+	assert.equal(summaryReplyText(done, summaryPrompt(true)), undefined);
 });
 
 const request = (overrides: Partial<MergeRequest> = {}): MergeRequest => ({

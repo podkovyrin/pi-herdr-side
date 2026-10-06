@@ -1,24 +1,33 @@
-import { existsSync, watch, type FSWatcher } from "node:fs";
+import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
 	CURRENT_SESSION_VERSION,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
-	type ExtensionContext,
 	TreeSelectorComponent,
 } from "@earendil-works/pi-coding-agent";
 import { type Component, type Focusable, Key, matchesKey } from "@earendil-works/pi-tui";
-import { LAUNCH_FILE, MERGE_CUSTOM_TYPE, SIDE_NOTE } from "./constants.ts";
+import { LAUNCH_FILE, SIDE_NOTE } from "./constants.ts";
 import { buildForkSession, type EntryLike } from "./fork.ts";
 import { Herdr } from "./herdr.ts";
-import { buildLaunchScript, buildPiArgs, chooseDirection, shellQuote, type NewChatArgs, type ResumeChatArgs } from "./launch.ts";
-import { buildMergeMessage, deliveredRequestIds, findPendingMerges, mergeDetailsOf, type PendingMerge } from "./merge.ts";
+import {
+	buildLaunchScript,
+	buildPiArgs,
+	chooseDirection,
+	currentPiCommand,
+	forwardedEnv,
+	shellQuote,
+	sideChatTools,
+	type NewChatArgs,
+	type ResumeChatArgs,
+} from "./launch.ts";
 import {
 	type ChatMeta,
 	type ChatSummary,
 	chatPaths,
 	ensurePrivateDir,
+	isToolName,
 	listChats,
 	newChatId,
 	writeFileAtomic,
@@ -30,10 +39,14 @@ function errorText(error: unknown): string {
 	return (error instanceof Error ? error.message : String(error)).slice(0, 500);
 }
 
-/** Split the main pane, wait for its shell, and replace the shell with pi. */
+/**
+ * Split the main pane, wait for its shell, and replace the shell with pi. The
+ * script runs this pi with its PI_* and proxy variables; the side chat deletes
+ * it at startup.
+ */
 async function launchInPane(herdr: Herdr, cwd: string, chatDir: string, args: NewChatArgs | ResumeChatArgs): Promise<string> {
 	const launchPath = join(chatDir, LAUNCH_FILE);
-	await writeFileAtomic(launchPath, buildLaunchScript(buildPiArgs(args)), 0o700);
+	await writeFileAtomic(launchPath, buildLaunchScript(buildPiArgs(args), currentPiCommand(), forwardedEnv()), 0o700);
 	const mainPane = await herdr.currentPaneId();
 	const direction = chooseDirection(await herdr.paneRect(mainPane));
 	const paneId = await herdr.split(mainPane, direction, cwd);
@@ -87,6 +100,7 @@ export async function startSideChat(
 		});
 		const sessionFile = join(chatDir, fork.fileName);
 		await writeFileAtomic(sessionFile, fork.content);
+		const activeTools = pi.getActiveTools();
 		const meta: ChatMeta = {
 			version: 1,
 			chatId,
@@ -96,6 +110,9 @@ export async function startSideChat(
 			createdAt: now.toISOString(),
 			sessionFileName: fork.fileName,
 			noteEntryId: fork.noteEntryId,
+			noteByteOffset: fork.noteByteOffset,
+			// One invalid name would make the whole meta invalid, so keep only names it accepts.
+			tools: sideChatTools(activeTools).filter(isToolName),
 		};
 		await writeJson(chatPaths(chatDir).meta, meta);
 		await launchInPane(herdr, ctx.cwd, chatDir, {
@@ -105,7 +122,7 @@ export async function startSideChat(
 			provider: model.provider,
 			modelId: model.id,
 			thinkingLevel: pi.getThinkingLevel(),
-			tools: pi.getActiveTools(),
+			tools: activeTools,
 			...(question ? { question } : {}),
 		});
 	} catch (error) {
@@ -120,7 +137,12 @@ async function resumeSideChat(ctx: ExtensionCommandContext, herdr: Herdr, chat: 
 			await herdr.focus(chat.openPaneId);
 			return;
 		}
-		await launchInPane(herdr, chat.meta.cwd || ctx.cwd, chat.dir, { kind: "resume", sessionFile: chat.sessionFile, chatDir: chat.dir });
+		await launchInPane(herdr, chat.meta.cwd || ctx.cwd, chat.dir, {
+			kind: "resume",
+			sessionFile: chat.sessionFile,
+			chatDir: chat.dir,
+			...(chat.meta.tools ? { tools: chat.meta.tools } : {}),
+		});
 	} catch (error) {
 		ctx.ui.notify(`/side failed: ${errorText(error)}`, "error");
 	}
@@ -176,8 +198,11 @@ const MENU_NEW = "New side chat";
 const MENU_TREE = "Start from main thread tree…";
 const MENU_RESUME = "Resume side chat…";
 
+/** Chats that never ran a turn and are not open are leftovers once they are this old: pi failed to start, or the pane was closed at once. */
+const EMPTY_CHAT_GRACE_MS = 60_000;
+
 export async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext, herdr: Herdr, dir: string): Promise<void> {
-	const chats = await listChats(dir).catch(() => []);
+	const chats = await listChats(dir, { pruneEmptyAfterMs: EMPTY_CHAT_GRACE_MS }).catch(() => []);
 	const options = [MENU_NEW, MENU_TREE, ...(chats.length > 0 ? [MENU_RESUME] : [])];
 	const choice = await ctx.ui.select("Side chat", options);
 	if (choice === MENU_NEW) return startSideChat(pi, ctx, herdr, dir, {});
@@ -195,111 +220,4 @@ export async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext, h
 	const picked = await ctx.ui.select("Resume side chat", labels);
 	const chat = picked === undefined ? undefined : chats[labels.indexOf(picked)];
 	if (chat) await resumeSideChat(ctx, herdr, chat);
-}
-
-/**
- * Receives merges for one main session. Watches the session's side-chat
- * directory and delivers one request per idle period: the merged content as a
- * visible custom message, then the user's prompt as a new turn.
- */
-export class MergeReceiver {
-	private watcher: FSWatcher | undefined;
-	private timer: ReturnType<typeof setTimeout> | undefined;
-	private scanning = false;
-	private rescan = false;
-	private stopped = false;
-	/** Request ID → mailbox file, removed once the merge message is in the session. */
-	private readonly inFlight = new Map<string, string>();
-
-	private readonly pi: ExtensionAPI;
-	private readonly dir: string;
-	private readonly ctx: ExtensionContext;
-
-	constructor(pi: ExtensionAPI, dir: string, ctx: ExtensionContext) {
-		this.pi = pi;
-		this.dir = dir;
-		this.ctx = ctx;
-	}
-
-	async start(): Promise<void> {
-		await ensurePrivateDir(this.dir);
-		try {
-			this.watcher = watch(this.dir, { recursive: true }, () => this.schedule());
-			this.watcher.on("error", () => undefined);
-		} catch {
-			// Without a watcher, merges still arrive on session start and when the agent settles.
-		}
-		this.schedule(0);
-	}
-
-	stop(): void {
-		this.stopped = true;
-		this.watcher?.close();
-		this.watcher = undefined;
-		if (this.timer) clearTimeout(this.timer);
-	}
-
-	schedule(delayMs = 150): void {
-		if (this.stopped) return;
-		if (this.timer) clearTimeout(this.timer);
-		this.timer = setTimeout(() => void this.scan(), delayMs);
-		this.timer.unref?.();
-	}
-
-	/** Called for every finished message. Removes the mailbox file once the merge is persisted. */
-	onMessageEnd(message: { role?: string; customType?: string; details?: unknown }): void {
-		if (message.role !== "custom" || message.customType !== MERGE_CUSTOM_TYPE) return;
-		const requestId = mergeDetailsOf(message.details)?.requestId;
-		const path = requestId ? this.inFlight.get(requestId) : undefined;
-		if (!requestId || !path) return;
-		this.inFlight.delete(requestId);
-		void rm(path, { force: true }).catch(() => undefined);
-	}
-
-	private async scan(): Promise<void> {
-		if (this.stopped) return;
-		if (this.scanning) {
-			this.rescan = true;
-			return;
-		}
-		this.scanning = true;
-		try {
-			const sessionId = this.ctx.sessionManager.getSessionId();
-			const pending = await findPendingMerges(this.dir, sessionId);
-			if (pending.length === 0 || this.stopped) return;
-			const delivered = deliveredRequestIds(this.ctx.sessionManager.getEntries() as unknown as Array<Record<string, unknown>>);
-			const next: PendingMerge[] = [];
-			for (const merge of pending) {
-				if (delivered.has(merge.request.requestId)) await rm(merge.path, { force: true }).catch(() => undefined);
-				else if (!this.inFlight.has(merge.request.requestId)) next.push(merge);
-			}
-			// Never inject into a running turn or a compaction. agent_settled schedules the next scan.
-			const first = next[0];
-			if (!first || !this.ctx.isIdle()) return;
-			this.deliver(first);
-		} catch {
-			// A broken mailbox must not break the main session. The next event retries.
-		} finally {
-			this.scanning = false;
-			if (this.rescan) {
-				this.rescan = false;
-				this.schedule();
-			}
-		}
-	}
-
-	private deliver({ path, request }: PendingMerge): void {
-		this.inFlight.set(request.requestId, path);
-		this.pi.sendMessage(
-			{
-				customType: MERGE_CUSTOM_TYPE,
-				content: buildMergeMessage(request),
-				display: true,
-				details: { requestId: request.requestId, chatId: request.chatId, mode: request.mode, title: request.title },
-			},
-			{ triggerTurn: false },
-		);
-		this.pi.sendUserMessage(request.prompt);
-		this.ctx.ui.notify(`Merged side chat "${request.title}"`, "info");
-	}
 }

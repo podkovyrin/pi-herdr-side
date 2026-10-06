@@ -1,7 +1,7 @@
 import { readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { MAX_PROMPT_BYTES, MERGE_CONTENT_BUDGET_BYTES, MERGE_CUSTOM_TYPE, MERGE_FILE_PREFIX } from "./constants.ts";
-import { isSafePathPart } from "./store.ts";
+import { isSafePathPart, textOf, withoutSummaryTurns } from "./store.ts";
 import { tailBytes } from "./text.ts";
 
 export type MergeMode = "transcript" | "summary";
@@ -66,15 +66,15 @@ function textBlocks(content: unknown): string {
 
 /**
  * User and assistant text from side-chat entries. Tool calls, tool results,
- * and thinking are left out. Over budget, whole turns drop from the start, so
- * the newest findings survive.
+ * thinking, and earlier summary turns are left out. Over budget, whole turns
+ * drop from the start, so the newest findings survive.
  */
 export function buildTranscript(
 	entries: ReadonlyArray<Record<string, unknown>>,
 	budgetBytes = MERGE_CONTENT_BUDGET_BYTES,
 ): string | undefined {
 	const turns: string[] = [];
-	for (const entry of entries) {
+	for (const entry of withoutSummaryTurns(entries)) {
 		if (entry.type !== "message") continue;
 		const message = entry.message as { role?: unknown; content?: unknown } | undefined;
 		if (message?.role !== "user" && message?.role !== "assistant") continue;
@@ -98,7 +98,7 @@ export function buildTranscript(
 	return kept.join("\n\n");
 }
 
-/** The latest assistant text on the branch. Used for summary mode. */
+/** The latest assistant text in the entries. */
 export function lastAssistantText(entries: ReadonlyArray<Record<string, unknown>>): string | undefined {
 	for (let index = entries.length - 1; index >= 0; index -= 1) {
 		const entry = entries[index] as Record<string, unknown>;
@@ -110,6 +110,23 @@ export function lastAssistantText(entries: ReadonlyArray<Record<string, unknown>
 		if (text) return tailBytes(text, MERGE_CONTENT_BUDGET_BYTES);
 	}
 	return undefined;
+}
+
+/**
+ * The reply to one summary prompt: assistant text after the last user entry
+ * with exactly that prompt, up to the next user message. Earlier side-chat
+ * answers never count as the summary.
+ */
+export function summaryReplyText(entries: ReadonlyArray<Record<string, unknown>>, prompt: string): string | undefined {
+	const isUser = (entry: Record<string, unknown>) =>
+		entry.type === "message" && (entry.message as { role?: unknown } | undefined)?.role === "user";
+	const start = entries.findLastIndex(
+		(entry) => isUser(entry) && textOf((entry.message as { content?: unknown }).content).trim() === prompt.trim(),
+	);
+	if (start === -1) return undefined;
+	const rest = entries.slice(start + 1);
+	const end = rest.findIndex(isUser);
+	return lastAssistantText(end === -1 ? rest : rest.slice(0, end));
 }
 
 export function buildMergeMessage(request: MergeRequest): string {

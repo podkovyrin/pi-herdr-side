@@ -34,3 +34,9 @@ export function summaryPrompt(sinceLastMerge: boolean): string {
 		: "this side chat";
 	return `Summarize ${scope} for the main session. Include the conclusions, decisions, facts you verified, and open questions. Leave out the forked main-session context that came before the side chat. Write only the summary.`;
 }
+
+/** Summary turns are merge plumbing, not side-chat content. Transcripts, titles, and counts skip them. */
+export function isSummaryPrompt(text: string): boolean {
+	const trimmed = text.trim();
+	return trimmed === summaryPrompt(true) || trimmed === summaryPrompt(false);
+}

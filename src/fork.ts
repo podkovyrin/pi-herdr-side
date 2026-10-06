@@ -30,6 +30,8 @@ export interface ForkOutput {
 	content: string;
 	/** ID of the hidden note entry. Side-chat turns start after it. */
 	noteEntryId: string;
+	/** Byte offset of the note line in content. Listing chats reads from here. */
+	noteByteOffset: number;
 }
 
 /** pi names session files `<ISO timestamp with - for : and .>_<session id>.jsonl`. */
@@ -76,7 +78,9 @@ export function buildForkSession(input: ForkInput): ForkOutput {
 	};
 	parentId = noteEntryId;
 
-	const lines = [header, ...input.branch, note].map((value) => JSON.stringify(value));
+	const lines = [header, ...input.branch].map((value) => JSON.stringify(value));
+	const noteByteOffset = Buffer.byteLength(`${lines.join("\n")}\n`, "utf8");
+	lines.push(JSON.stringify(note));
 	if (input.name) {
 		const infoId = newEntryId(taken);
 		lines.push(JSON.stringify({ type: "session_info", id: infoId, parentId, timestamp, name: input.name }));
@@ -85,5 +89,6 @@ export function buildForkSession(input: ForkInput): ForkOutput {
 		fileName: sessionFileName(input.sessionId, input.now),
 		content: `${lines.join("\n")}\n`,
 		noteEntryId,
+		noteByteOffset,
 	};
 }

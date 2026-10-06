@@ -43,6 +43,15 @@ test("fork reuses the main session ID and copies the branch unchanged", () => {
 	assert.equal(lines.length, 5);
 });
 
+test("the note byte offset points at the note line", () => {
+	const unicodeBranch = [...branch, { type: "message", id: "a4", parentId: "a3", message: { role: "user", content: "ünïcødé 🎉" } }];
+	const fork = buildForkSession({ sessionId: "s", sessionVersion: 3, cwd: "/", branch: unicodeBranch, note: "N", name: "n", now });
+	const tail = Buffer.from(fork.content, "utf8").subarray(fork.noteByteOffset).toString("utf8");
+	assert.equal(JSON.parse(tail.slice(0, tail.indexOf("\n"))).id, fork.noteEntryId);
+	const empty = buildForkSession({ sessionId: "s", sessionVersion: 3, cwd: "/", branch: [], note: "N", now });
+	assert.equal(empty.noteByteOffset, fork.content.indexOf("\n") + 1);
+});
+
 test("fork appends a session name after the note", () => {
 	const fork = buildForkSession({ sessionId: "s", sessionVersion: 3, cwd: "/", branch, note: "N", name: "Why?", now });
 	const lines = fork.content.trimEnd().split("\n").map((line) => JSON.parse(line));

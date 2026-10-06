@@ -21,15 +21,18 @@ export function toTitle(text: string): string {
 	return truncate(singleLine(text), MAX_TITLE_CHARS);
 }
 
-/** Keep at most maxBytes of UTF-8 from the end of the text. */
+/**
+ * Keep at most maxBytes of UTF-8 from the end of the text. The cut skips
+ * UTF-8 continuation bytes, so it never splits a character or a surrogate pair.
+ */
 export function tailBytes(text: string, maxBytes: number): string {
-	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
-	let sliced = text.slice(-maxBytes);
-	while (Buffer.byteLength(sliced, "utf8") > maxBytes) {
-		const excess = Buffer.byteLength(sliced, "utf8") - maxBytes;
-		sliced = sliced.slice(Math.max(1, Math.ceil(excess / 4)));
-	}
-	return sliced;
+	if (!(maxBytes > 0)) return "";
+	const bytes = Buffer.from(text, "utf8");
+	if (bytes.length <= maxBytes) return text;
+	let start = bytes.length - Math.floor(maxBytes);
+	// Continuation bytes look like 10xxxxxx.
+	while (start < bytes.length && ((bytes[start] as number) & 0xc0) === 0x80) start += 1;
+	return bytes.subarray(start).toString("utf8");
 }
 
 export function formatAge(from: number, now = Date.now()): string {
