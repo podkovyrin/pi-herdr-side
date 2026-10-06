@@ -5,6 +5,14 @@
   "type": "module",
   "license": "MIT",
   "author": "Andrei Podkovyrin",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/podkovyrin/pi-herdr-side.git"
+  },
+  "homepage": "https://github.com/podkovyrin/pi-herdr-side#readme",
+  "bugs": {
+    "url": "https://github.com/podkovyrin/pi-herdr-side/issues"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",

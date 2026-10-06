@@ -20,6 +20,12 @@ A [Pi](https://pi.dev) extension that opens a side chat in a new [Herdr](https:/
 pi install npm:pi-herdr-side
 ```
 
+From GitHub:
+
+```bash
+pi install git:github.com/podkovyrin/pi-herdr-side
+```
+
 From a checkout:
 
 ```bash
