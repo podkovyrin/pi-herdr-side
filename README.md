@@ -12,7 +12,11 @@ A [Pi](https://pi.dev) extension that opens a side chat in a new [Herdr](https:/
 ## Requirements
 
 - Pi 1.0.4 or later, in interactive mode.
-- Pi must run inside a Herdr pane (`HERDR_ENV=1`). Herdr 0.9 is tested.
+- Pi must run inside one of these:
+  - a pane of the Herdr TUI (`HERDR_ENV=1`). Herdr 0.9 is tested.
+  - a terminal of the Herdr desktop app (`HC_TERMINAL_ID` is set), with `herdr-app` and `hc` on `PATH`. Herdr app 0.1.17 is tested.
+
+  If you run the Herdr TUI inside a Herdr app terminal, side chats open as TUI panes.
 
 ## Install
 
@@ -52,7 +56,7 @@ There are no subcommands in the main session. `/side merge conflicts?` is a ques
 
 The new pane splits from the main pane, to the right if the pane is wide (width at least twice the height) and down if it isn't. Focus moves to the new pane. The pane closes when you quit the side chat. If pi can't start in the new pane, the pane shows an error and waits for Enter.
 
-The new pane runs the same pi as the main session: the same Node binary and pi script, not the `pi` on the new shell's `PATH`. The Node binary's directory goes first on `PATH` if it isn't on it yet, as pi's own launcher does. It gets the main pi's `PI_*` variables and proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, in either case). All other variables come from the new pane's shell. An API key that you exported only in the shell of the main pi is not there.
+The new pane runs the same pi as the main session: the same Node binary and pi script, not the `pi` on the new shell's `PATH`. The Node binary's directory goes first on `PATH` if it isn't on it yet, as pi's own launcher does. It gets the main pi's `PI_*` variables and proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, in either case). All other variables come from the new pane's shell. In the Herdr app, there's no shell: they come from herdr-core, which starts the pane's program. An API key that you exported only in the shell of the main pi is not there.
 
 Resume lists the side chats of the current main session, newest first. The title is the side chat's own name or its first question. A side chat that is already open gets focus instead of a second pane. Side chats that never ran a turn, aren't open, and are older than a minute are deleted when the menu opens.
 

@@ -6,7 +6,7 @@ import { test } from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { SideChatChild } from "../src/child.ts";
 import { MERGED_MARKER_TYPE, summaryPrompt } from "../src/constants.ts";
-import type { Herdr } from "../src/herdr.ts";
+import type { HerdrHost } from "../src/herdr.ts";
 import { type ChatMeta, ensurePrivateDir, writeJson, writeLiveMarker } from "../src/store.ts";
 
 type Entry = Record<string, unknown> & { type: string; id: string; parentId: string | null };
@@ -76,7 +76,10 @@ async function setup(
 			calls.shutdown += 1;
 		},
 	} as unknown as ExtensionCommandContext;
-	const herdr = { focus: async (paneId: string) => void calls.focused.push(paneId) } as unknown as Herdr;
+	const herdr = {
+		currentId: async () => "t4",
+		focus: async (paneId: string) => void calls.focused.push(paneId),
+	} as unknown as HerdrHost;
 	child = new SideChatChild(pi as unknown as ExtensionAPI, chatDir, herdr, {
 		summaryStartTimeoutMs: 50,
 		...(options.detectedByPath ? { detectedByPath: true } : {}),

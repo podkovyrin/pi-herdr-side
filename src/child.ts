@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { LAUNCH_FILE, MAX_PROMPT_BYTES, MERGED_MARKER_TYPE, summaryPrompt } from "./constants.ts";
 import type { EntryLike } from "./fork.ts";
-import type { Herdr } from "./herdr.ts";
+import type { HerdrHost } from "./herdr.ts";
 import { buildTranscript, isPromptWithinBounds, type MergeMode, type MergeRequest, summaryReplyText } from "./merge.ts";
 import {
 	type ChatMeta,
@@ -48,11 +48,11 @@ export class SideChatChild {
 
 	private readonly pi: ExtensionAPI;
 	private readonly chatDir: string;
-	private readonly herdr: Herdr;
+	private readonly herdr: HerdrHost;
 	private readonly summaryStartTimeoutMs: number;
 	private readonly detectedByPath: boolean;
 
-	constructor(pi: ExtensionAPI, chatDir: string, herdr: Herdr, options: ChildOptions = {}) {
+	constructor(pi: ExtensionAPI, chatDir: string, herdr: HerdrHost, options: ChildOptions = {}) {
 		this.pi = pi;
 		this.chatDir = chatDir;
 		this.herdr = herdr;
@@ -70,7 +70,7 @@ export class SideChatChild {
 		}
 		// pi does not restore tools from the session file. With the flag, --tools already set them.
 		if (this.detectedByPath && this.meta.tools) this.pi.setActiveTools(this.meta.tools);
-		const paneId = process.env.HERDR_PANE_ID;
+		const paneId = await this.herdr.currentId().catch(() => process.env.HERDR_PANE_ID);
 		if (paneId) await writeLiveMarker(chatPaths(this.chatDir).pane, paneId).catch(() => undefined);
 		if (ctx.mode === "tui") ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", "side chat · /side merges it back"));
 	}

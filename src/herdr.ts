@@ -1,4 +1,5 @@
 import net from "node:net";
+import { chooseDirection, shellQuote } from "./launch.ts";
 
 export interface ExecResult {
 	stdout: string;
@@ -23,10 +24,33 @@ export class HerdrError extends Error {
 	}
 }
 
+/**
+ * What /side needs from the program that shows its panes. IDs are opaque:
+ * pane IDs in the Herdr TUI, terminal IDs in the Herdr app.
+ */
+export interface HerdrHost {
+	/** The ID of the pane or terminal this pi runs in. */
+	currentId(): Promise<string>;
+	/** Open a pane beside `mainId` that runs `sh launchPath` in `cwd`, focus it, and return its ID. */
+	openBeside(mainId: string, cwd: string, launchPath: string): Promise<string>;
+	exists(id: string): Promise<boolean>;
+	focus(id: string): Promise<void>;
+}
+
 export function herdrEnvironmentProblem(env: NodeJS.ProcessEnv = process.env): string | undefined {
-	if (env.HERDR_ENV !== "1" || !env.HERDR_PANE_ID) return "/side must run inside a Herdr pane";
-	if (!env.HERDR_SOCKET_PATH) return "/side needs HERDR_SOCKET_PATH, which Herdr sets in its panes";
-	return undefined;
+	if (env.HERDR_ENV === "1" && env.HERDR_PANE_ID) {
+		return env.HERDR_SOCKET_PATH ? undefined : "/side needs HERDR_SOCKET_PATH, which Herdr sets in its panes";
+	}
+	if (env.HC_TERMINAL_ID) return undefined;
+	return "/side must run inside a Herdr pane or a Herdr app terminal";
+}
+
+/**
+ * The Herdr TUI wins when both are set: it can run inside a Herdr app
+ * terminal, and then its panes are the ones around this pi.
+ */
+export function createHerdrHost(exec: Exec, env: NodeJS.ProcessEnv = process.env): HerdrHost {
+	return env.HERDR_ENV === "1" && env.HERDR_PANE_ID ? new Herdr(exec, env) : new HerdrApp(exec, env);
 }
 
 /** Herdr prints `{"id":…,"error":{"code":…,"message":…}}` on stderr when a request fails. */
@@ -72,7 +96,7 @@ export function isShellReady(result: Record<string, unknown>): boolean {
 	return info.foreground_processes.length > 0 && info.foreground_processes.every((p) => p.pid === info.shell_pid);
 }
 
-export class Herdr {
+export class Herdr implements HerdrHost {
 	private readonly exec: Exec;
 	private readonly env: NodeJS.ProcessEnv;
 
@@ -97,8 +121,22 @@ export class Herdr {
 	}
 
 	/** Resolve the caller's pane. HERDR_PANE_ID can be stale after a pane moves between workspaces. */
-	async currentPaneId(): Promise<string> {
+	async currentId(): Promise<string> {
 		return paneIdOf((await this.pane(["current", "--current"])).pane);
+	}
+
+	/** Split the main pane, wait for its shell, and replace the shell with the launch script. */
+	async openBeside(mainId: string, cwd: string, launchPath: string): Promise<string> {
+		const direction = chooseDirection(await this.paneRect(mainId));
+		const paneId = await this.split(mainId, direction, cwd);
+		try {
+			await this.waitForShell(paneId);
+			await this.run(paneId, `exec sh ${shellQuote(launchPath)}`);
+		} catch (error) {
+			await this.close(paneId).catch(() => undefined);
+			throw error;
+		}
+		return paneId;
 	}
 
 	async paneRect(paneId: string): Promise<PaneRect> {
@@ -141,7 +179,7 @@ export class Herdr {
 		await this.pane(["close", paneId]);
 	}
 
-	async paneExists(paneId: string): Promise<boolean> {
+	async exists(paneId: string): Promise<boolean> {
 		try {
 			await this.pane(["get", paneId], 5_000);
 			return true;
@@ -186,5 +224,98 @@ export class Herdr {
 			});
 			socket.on("end", () => finish(new HerdrError("herdr closed the socket before replying")));
 		});
+	}
+}
+
+/**
+ * The Herdr app: `herdr-app` arranges the window, `hc` (herdr-core) owns the
+ * terminals. IDs are terminal IDs such as `t3`, which stay the same when a
+ * pane moves; pane IDs do not.
+ */
+export class HerdrApp implements HerdrHost {
+	private readonly exec: Exec;
+	private readonly env: NodeJS.ProcessEnv;
+
+	constructor(exec: Exec, env: NodeJS.ProcessEnv = process.env) {
+		this.exec = exec;
+		this.env = env;
+	}
+
+	private async json(binary: string, args: string[], timeout = 10_000): Promise<Record<string, unknown>> {
+		const result = await this.exec(binary, args, { timeout });
+		if (result.killed) throw new HerdrError(`${binary} ${args[0]} timed out`);
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(result.stdout || result.stderr);
+		} catch {
+			throw new HerdrError((result.stderr.trim() || result.stdout.trim() || `${binary} exited with code ${result.code}`).slice(0, 500));
+		}
+		// herdr-app: {"error": "..."}; hc: {"error": {"kind", "message"}}.
+		const error = (parsed as { error?: unknown }).error;
+		if (typeof error === "string") throw new HerdrError(error);
+		if (error && typeof error === "object") {
+			const { kind, message } = error as { kind?: unknown; message?: unknown };
+			throw new HerdrError(typeof message === "string" ? message : JSON.stringify(error), typeof kind === "string" ? kind : undefined);
+		}
+		if (result.code !== 0) throw new HerdrError(`${binary} exited with code ${result.code}`);
+		if (!parsed || typeof parsed !== "object") throw new HerdrError(`${binary} returned no result`);
+		return parsed as Record<string, unknown>;
+	}
+
+	private app(command: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+		return this.json("herdr-app", ["do", command, JSON.stringify(args)]);
+	}
+
+	private terminal(id: string, timeout?: number): Promise<Record<string, unknown>> {
+		return this.json("hc", ["get", id, "--json"], timeout);
+	}
+
+	async currentId(): Promise<string> {
+		const id = this.env.HC_TERMINAL_ID;
+		if (!id) throw new HerdrError("HC_TERMINAL_ID is not set");
+		return id;
+	}
+
+	private async paneOf(terminalId: string): Promise<string> {
+		type Listing = { spaces?: Array<{ tabs?: Array<{ terminals?: Array<{ terminal?: unknown; pane?: unknown }> }> }> };
+		const listing = (await this.json("herdr-app", ["ls"])) as Listing;
+		for (const space of listing.spaces ?? []) {
+			for (const tab of space.tabs ?? []) {
+				const pane = tab.terminals?.find((entry) => entry.terminal === terminalId)?.pane;
+				if (typeof pane === "string" && pane.length > 0) return pane;
+			}
+		}
+		throw new HerdrError(`the Herdr window shows no pane for terminal ${terminalId}`);
+	}
+
+	async openBeside(mainId: string, cwd: string, launchPath: string): Promise<string> {
+		const main = await this.terminal(mainId);
+		const { cols, rows } = main as { cols?: unknown; rows?: unknown };
+		if (typeof cols !== "number" || typeof rows !== "number" || cols <= 0 || rows <= 0) {
+			throw new HerdrError("hc returned no valid size for the main terminal");
+		}
+		// The app runs argv directly, not through a shell, so change to the folder here.
+		const argv = ["/bin/sh", "-c", 'cd "$1" && exec sh "$2"', "sh", cwd, launchPath];
+		const created = await this.app("pane.split", {
+			direction: chooseDirection({ width: cols, height: rows }),
+			pane: await this.paneOf(mainId),
+			argv,
+		});
+		const terminal = created.terminal;
+		if (typeof terminal !== "string" || terminal.length === 0) throw new HerdrError("herdr-app returned no terminal ID");
+		return terminal;
+	}
+
+	async exists(id: string): Promise<boolean> {
+		try {
+			return (await this.terminal(id, 5_000)).state === "live";
+		} catch (error) {
+			if (error instanceof HerdrError && error.code === "not_found") return false;
+			throw error;
+		}
+	}
+
+	async focus(id: string): Promise<void> {
+		await this.app("pane.focus", { terminal: id });
 	}
 }

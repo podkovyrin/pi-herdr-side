@@ -10,14 +10,12 @@ import {
 import { type Component, type Focusable, Key, matchesKey } from "@earendil-works/pi-tui";
 import { LAUNCH_FILE, SIDE_NOTE } from "./constants.ts";
 import { buildForkSession, type EntryLike } from "./fork.ts";
-import { Herdr } from "./herdr.ts";
+import type { HerdrHost } from "./herdr.ts";
 import {
 	buildLaunchScript,
 	buildPiArgs,
-	chooseDirection,
 	currentPiCommand,
 	forwardedEnv,
-	shellQuote,
 	sideChatTools,
 	type NewChatArgs,
 	type ResumeChatArgs,
@@ -40,24 +38,14 @@ function errorText(error: unknown): string {
 }
 
 /**
- * Split the main pane, wait for its shell, and replace the shell with pi. The
- * script runs this pi with its PI_* and proxy variables; the side chat deletes
- * it at startup.
+ * Open a pane beside the main one that runs the launch script. The script
+ * runs this pi with its PI_* and proxy variables; the side chat deletes it at
+ * startup.
  */
-async function launchInPane(herdr: Herdr, cwd: string, chatDir: string, args: NewChatArgs | ResumeChatArgs): Promise<string> {
+async function launchInPane(herdr: HerdrHost, cwd: string, chatDir: string, args: NewChatArgs | ResumeChatArgs): Promise<string> {
 	const launchPath = join(chatDir, LAUNCH_FILE);
 	await writeFileAtomic(launchPath, buildLaunchScript(buildPiArgs(args), currentPiCommand(), forwardedEnv()), 0o700);
-	const mainPane = await herdr.currentPaneId();
-	const direction = chooseDirection(await herdr.paneRect(mainPane));
-	const paneId = await herdr.split(mainPane, direction, cwd);
-	try {
-		await herdr.waitForShell(paneId);
-		await herdr.run(paneId, `exec sh ${shellQuote(launchPath)}`);
-	} catch (error) {
-		await herdr.close(paneId).catch(() => undefined);
-		throw error;
-	}
-	return paneId;
+	return herdr.openBeside(await herdr.currentId(), cwd, launchPath);
 }
 
 export interface StartOptions {
@@ -69,7 +57,7 @@ export interface StartOptions {
 export async function startSideChat(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
-	herdr: Herdr,
+	herdr: HerdrHost,
 	dir: string,
 	options: StartOptions,
 ): Promise<void> {
@@ -131,9 +119,9 @@ export async function startSideChat(
 	}
 }
 
-async function resumeSideChat(ctx: ExtensionCommandContext, herdr: Herdr, chat: ChatSummary): Promise<void> {
+async function resumeSideChat(ctx: ExtensionCommandContext, herdr: HerdrHost, chat: ChatSummary): Promise<void> {
 	try {
-		if (chat.openPaneId && (await herdr.paneExists(chat.openPaneId))) {
+		if (chat.openPaneId && (await herdr.exists(chat.openPaneId))) {
 			await herdr.focus(chat.openPaneId);
 			return;
 		}
@@ -201,7 +189,7 @@ const MENU_RESUME = "Resume side chat…";
 /** Chats that never ran a turn and are not open are leftovers once they are this old: pi failed to start, or the pane was closed at once. */
 const EMPTY_CHAT_GRACE_MS = 60_000;
 
-export async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext, herdr: Herdr, dir: string): Promise<void> {
+export async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext, herdr: HerdrHost, dir: string): Promise<void> {
 	const chats = await listChats(dir, { pruneEmptyAfterMs: EMPTY_CHAT_GRACE_MS }).catch(() => []);
 	const options = [MENU_NEW, MENU_TREE, ...(chats.length > 0 ? [MENU_RESUME] : [])];
 	const choice = await ctx.ui.select("Side chat", options);

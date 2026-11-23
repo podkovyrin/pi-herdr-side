@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { SideChatChild } from "./src/child.ts";
 import { SIDE_CHAT_FLAG, SIDE_SESSIONS_DIR_NAME } from "./src/constants.ts";
-import { Herdr, herdrEnvironmentProblem } from "./src/herdr.ts";
+import { createHerdrHost, herdrEnvironmentProblem } from "./src/herdr.ts";
 import { showMenu, startSideChat } from "./src/parent.ts";
 import { MergeReceiver } from "./src/receiver.ts";
 import { detectSideChatDir, isInsideDir, parentDir, parentMarkerPath, removeOwnLiveMarker, writeLiveMarker } from "./src/store.ts";
@@ -14,7 +14,7 @@ export default function piHerdrSide(pi: ExtensionAPI): void {
 		description: "Internal: run this pi process as a pi-herdr-side side chat stored in the given directory",
 	});
 
-	const herdr = new Herdr((command, args, options) => pi.exec(command, args, options));
+	const herdr = createHerdrHost((command, args, options) => pi.exec(command, args, options));
 	const root = () => join(getAgentDir(), SIDE_SESSIONS_DIR_NAME);
 	const flaggedChatDir = () => {
 		const value = pi.getFlag(SIDE_CHAT_FLAG);
@@ -51,7 +51,7 @@ export default function piHerdrSide(pi: ExtensionAPI): void {
 		mainSessionDir = sessionDir;
 		await receiver.start().catch(() => undefined);
 		// The marker tells side chats that this session is running and which pane to focus after a merge.
-		const paneId = await herdr.currentPaneId().catch(() => process.env.HERDR_PANE_ID);
+		const paneId = await herdr.currentId().catch(() => process.env.HERDR_PANE_ID);
 		if (paneId) {
 			markerPath = parentMarkerPath(sessionDir);
 			await writeLiveMarker(markerPath, paneId).catch(() => undefined);
@@ -88,7 +88,7 @@ export default function piHerdrSide(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("side", {
-		description: "[question] — Open a side chat in a new Herdr pane. In a side chat: merge it back into the main session",
+		description: "[question] — Open a side chat in a new Herdr pane (TUI or app). In a side chat: merge it back into the main session",
 		handler: async (args, ctx) => {
 			if (child) {
 				await child.merge(args, ctx);
